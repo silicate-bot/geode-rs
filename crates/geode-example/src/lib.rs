@@ -1,6 +1,8 @@
 use geode_rs::classes::*;
 use geode_rs::*;
 
+geode_egui::install_hooks!();
+
 #[geode_main]
 fn main() {
     #[cfg(target_os = "android")]
@@ -12,6 +14,23 @@ fn main() {
 
     #[cfg(not(target_os = "android"))]
     simple_logger::SimpleLogger::new().init().unwrap();
+
+    let mut demos = egui_demo_lib::DemoWindows::default();
+    let mut show_demos = false;
+
+    geode_egui::set_ui(move |ctx| {
+        geode_egui::egui::Window::new("geode-egui + geode-rs")
+            .default_pos(geode_egui::egui::pos2(24.0, 24.0))
+            .show(ctx, |ui| {
+                ui.heading("Hello from Rust");
+                ui.label("This window is rendered through cocos + egui_glow, using geode-rs.");
+                ui.checkbox(&mut show_demos, "Show demos");
+            });
+
+        if show_demos {
+            demos.ui(ctx);
+        }
+    });
 
     log::info!("Example mod loaded from Rust!");
 }

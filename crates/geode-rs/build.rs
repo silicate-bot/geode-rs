@@ -612,7 +612,218 @@ fn process_extern_block(content: &str) -> String {
     result = result.replace("LARGE_INTEGER", "std::ffi::c_void");
     result = result.replace("XINPUT_STATE", "std::ffi::c_void");
     result = replace_vtable_types(&result);
-    result
+    generate_dynamic_function_wrapper(&result).unwrap_or(result)
+}
+
+#[cfg(feature = "bindgen")]
+fn generate_dynamic_function_wrapper(content: &str) -> Option<String> {
+    if !content.contains("pub fn ") {
+        return None;
+    }
+
+    let link_name_re = regex::Regex::new(r#"#\[link_name = "([^"]+)""#).unwrap();
+    let symbol = link_name_re.captures(content)?.get(1)?.as_str();
+    let symbol = symbol.strip_prefix(r"\u{1}").unwrap_or(symbol);
+
+    let fn_start = content.find("pub fn ")?;
+    let fn_decl = content[fn_start..]
+        .split_once(';')
+        .map(|(decl, _)| decl.trim())?;
+
+    let name_start = "pub fn ".len();
+    let open_paren = fn_decl[name_start..].find('(')? + name_start;
+    let fn_name = fn_decl[name_start..open_paren].trim();
+
+    let close_paren = find_matching_delimiter(fn_decl, open_paren, '(', ')')?;
+    let params_str = &fn_decl[open_paren + 1..close_paren];
+    let return_str = fn_decl[close_paren + 1..].trim();
+
+    let params = split_top_level(params_str, ',');
+    let mut call_args = Vec::new();
+    let mut fn_types = Vec::new();
+    for param in params.iter().map(|p| p.trim()).filter(|p| !p.is_empty()) {
+        let colon = find_top_level_colon(param)?;
+        let name = param[..colon].trim();
+        let ty = param[colon + 1..].trim();
+        call_args.push(name.to_string());
+        fn_types.push(ty.to_string());
+    }
+
+    let return_clause = if return_str.is_empty() {
+        String::new()
+    } else {
+        format!(" {return_str}")
+    };
+    let windows_value_return = windows_symbol_needs_sret(symbol);
+    let is_method = params
+        .first()
+        .and_then(|param| param.split(':').next())
+        .map(str::trim)
+        == Some("this");
+
+    let fn_type = if fn_types.is_empty() {
+        format!("unsafe extern \"C\" fn(){return_clause}")
+    } else {
+        format!(
+            "unsafe extern \"C\" fn({}){return_clause}",
+            fn_types.join(", ")
+        )
+    };
+
+    let call_expr = if call_args.is_empty() {
+        "func()".to_string()
+    } else {
+        format!("func({})", call_args.join(", "))
+    };
+    let windows_call = if windows_value_return {
+        let ret_ty = return_str.strip_prefix("-> ").unwrap_or(return_str).trim();
+        if is_method {
+            let this_ty = fn_types.first()?.clone();
+            let rest_types = if fn_types.len() > 1 {
+                format!(", {}", fn_types[1..].join(", "))
+            } else {
+                String::new()
+            };
+            let rest_args = if call_args.len() > 1 {
+                format!(", {}", call_args[1..].join(", "))
+            } else {
+                String::new()
+            };
+            let this_arg = call_args.first()?;
+            format!(
+                "let mut out = std::mem::MaybeUninit::<{ret_ty}>::uninit();\n            let func: unsafe extern \"system\" fn({this_ty}, *mut {ret_ty}{rest_types}) -> () = std::mem::transmute(addr);\n            func({this_arg}, out.as_mut_ptr(){rest_args});\n            out.assume_init()"
+            )
+        } else {
+            let arg_types = if fn_types.is_empty() {
+                String::new()
+            } else {
+                format!(", {}", fn_types.join(", "))
+            };
+            let arg_names = if call_args.is_empty() {
+                String::new()
+            } else {
+                format!(", {}", call_args.join(", "))
+            };
+            format!(
+                "let mut out = std::mem::MaybeUninit::<{ret_ty}>::uninit();\n            let func: unsafe extern \"system\" fn(*mut {ret_ty}{arg_types}) -> () = std::mem::transmute(addr);\n            func(out.as_mut_ptr(){arg_names});\n            out.assume_init()"
+            )
+        }
+    } else {
+        format!(
+            "let func: {fn_type} = std::mem::transmute(addr);\n            {call_expr}"
+        )
+    };
+
+    let symbol_bytes = rust_byte_string(symbol);
+
+    Some(format!(
+        "#[inline]\npub unsafe fn {fn_name}({params_str}){return_clause} {{\n    fn __addr() -> usize {{\n        #[cfg(target_os = \"windows\")]\n        {{\n            static A: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);\n            crate::base::resolve_windows_symbol_in_modules_abs(\n                &[\n                    crate::base::get_cocos(),\n                    crate::base::get_extensions(),\n                    crate::base::get(),\n                    crate::base::get_geode(),\n                ],\n                {symbol_bytes},\n                &A,\n            )\n        }}\n        #[cfg(all(target_os = \"android\", target_arch = \"arm\"))]\n        {{\n            static A: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);\n            crate::base::android_resolve_symbol_abs({symbol_bytes}, &A)\n        }}\n        #[cfg(all(target_os = \"android\", target_arch = \"aarch64\"))]\n        {{\n            static A: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);\n            crate::base::android_resolve_symbol_abs({symbol_bytes}, &A)\n        }}\n        #[cfg(any(target_os = \"macos\", target_os = \"ios\"))]\n        {{\n            static A: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);\n            crate::base::resolve_dylib_symbol_abs({symbol_bytes}, &A)\n        }}\n        #[cfg(not(any(\n            target_os = \"windows\",\n            all(target_os = \"android\", target_arch = \"arm\"),\n            all(target_os = \"android\", target_arch = \"aarch64\"),\n            target_os = \"macos\",\n            target_os = \"ios\"\n        )))]\n        {{\n            0\n        }}\n    }}\n\n    let addr = __addr();\n    assert!(addr != 0, \"failed to resolve {fn_name}\");\n    #[cfg(target_os = \"windows\")]\n    {{\n        {windows_call}\n    }}\n    #[cfg(not(target_os = \"windows\"))]\n    {{\n        let func: {fn_type} = std::mem::transmute(addr);\n        {call_expr}\n    }}\n}}\n"
+    ))
+}
+
+#[cfg(feature = "bindgen")]
+fn find_matching_delimiter(s: &str, start: usize, open: char, close: char) -> Option<usize> {
+    let mut depth = 0usize;
+    for (offset, ch) in s[start..].char_indices() {
+        if ch == open {
+            depth += 1;
+        } else if ch == close {
+            depth = depth.saturating_sub(1);
+            if depth == 0 {
+                return Some(start + offset);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(feature = "bindgen")]
+fn split_top_level(s: &str, separator: char) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut start = 0usize;
+    let mut paren = 0usize;
+    let mut angle = 0usize;
+    let mut bracket = 0usize;
+    let mut brace = 0usize;
+
+    for (idx, ch) in s.char_indices() {
+        match ch {
+            '(' => paren += 1,
+            ')' => paren = paren.saturating_sub(1),
+            '<' => angle += 1,
+            '>' => angle = angle.saturating_sub(1),
+            '[' => bracket += 1,
+            ']' => bracket = bracket.saturating_sub(1),
+            '{' => brace += 1,
+            '}' => brace = brace.saturating_sub(1),
+            _ => {}
+        }
+
+        if ch == separator && paren == 0 && angle == 0 && bracket == 0 && brace == 0 {
+            parts.push(s[start..idx].to_string());
+            start = idx + ch.len_utf8();
+        }
+    }
+
+    if start < s.len() {
+        parts.push(s[start..].to_string());
+    }
+
+    parts
+}
+
+#[cfg(feature = "bindgen")]
+fn find_top_level_colon(s: &str) -> Option<usize> {
+    let mut paren = 0usize;
+    let mut angle = 0usize;
+    let mut bracket = 0usize;
+    let mut brace = 0usize;
+
+    for (idx, ch) in s.char_indices() {
+        match ch {
+            '(' => paren += 1,
+            ')' => paren = paren.saturating_sub(1),
+            '<' => angle += 1,
+            '>' => angle = angle.saturating_sub(1),
+            '[' => bracket += 1,
+            ']' => bracket = bracket.saturating_sub(1),
+            '{' => brace += 1,
+            '}' => brace = brace.saturating_sub(1),
+            ':' if paren == 0 && angle == 0 && bracket == 0 && brace == 0 => return Some(idx),
+            _ => {}
+        }
+    }
+
+    None
+}
+
+#[cfg(feature = "bindgen")]
+fn rust_byte_string(s: &str) -> String {
+    let mut out = String::from("b\"");
+    for &byte in s.as_bytes() {
+        match byte {
+            b'\\' => out.push_str("\\\\"),
+            b'"' => out.push_str("\\\""),
+            b'\n' => out.push_str("\\n"),
+            b'\r' => out.push_str("\\r"),
+            b'\t' => out.push_str("\\t"),
+            0x20..=0x7e => out.push(byte as char),
+            _ => out.push_str(&format!("\\x{byte:02x}")),
+        }
+    }
+    out.push_str("\\0\"");
+    out
+}
+
+#[cfg(feature = "bindgen")]
+fn windows_symbol_needs_sret(symbol: &str) -> bool {
+    if !symbol.starts_with('?') {
+        return false;
+    }
+
+    regex::Regex::new(r"@@[^@]*\?A[UV]")
+        .unwrap()
+        .is_match(symbol)
 }
 
 #[cfg(feature = "bindgen")]

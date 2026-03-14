@@ -5,7 +5,6 @@ use std::ffi::c_void;
 use std::sync::{Mutex, OnceLock};
 
 use crate::CallingConvention;
-use crate::base;
 use crate::loader::Hook;
 
 pub struct ModifyStorage<T> {
@@ -64,12 +63,9 @@ pub unsafe fn register_hook(
     name: &str,
     convention: CallingConvention,
 ) {
-    let base = base::get();
-    let actual_address = base + address;
-
     let hooks = PENDING_HOOKS.get_or_init(|| Mutex::new(Vec::new()));
     hooks.lock().unwrap().push(PendingHook {
-        address: actual_address as *mut c_void,
+        address: address as *mut c_void,
         detour,
         name: name.to_string(),
         convention,

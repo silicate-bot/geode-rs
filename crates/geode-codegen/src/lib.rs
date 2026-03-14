@@ -4,6 +4,7 @@ pub mod function;
 pub mod member;
 pub mod platform;
 pub mod types;
+pub mod windows_symbol;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -65,10 +66,7 @@ pub fn generate(config: Config) -> Result<()> {
                 class::generate_class(class, &merged, platform, config.generate_docs, true, true);
             let file_path = classes_dir.join(format!("{module_name}.rs"));
             std::fs::write(&file_path, output)?;
-            class_modules.push((
-                module_name,
-                class::serialize_name(&class.name).to_string(),
-            ));
+            class_modules.push((module_name, class::serialize_name(&class.name).to_string()));
         }
 
         let classes_mod = generate_classes_mod(&class_modules);

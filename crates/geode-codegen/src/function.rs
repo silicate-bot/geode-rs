@@ -1,8 +1,11 @@
 use crate::android_symbol::generate_android_symbol;
-use broma_rs::{Function, FunctionBindField, FunctionType, PlatformNumber};
+use crate::windows_symbol::generate_windows_symbol;
+use broma_rs::{
+    Function, FunctionBindField, FunctionType, Platform as BromaPlatform, PlatformNumber,
+};
 
 use crate::platform::Platform;
-use crate::types::cpp_to_rust_type;
+use crate::types::{RustType, cpp_to_rust_type};
 
 const INLINE: isize = -2;
 const UNSPECIFIED: isize = -1;
@@ -47,12 +50,11 @@ fn generate_free_function(func: &Function, platform: Platform, generate_docs: bo
         .collect();
 
     let addr = get_platform_address(&func.binds, platform);
+    let linked = func.prototype.attributes.links;
 
-    if addr == INLINE || addr == UNSPECIFIED {
+    if addr == INLINE || (addr == UNSPECIFIED && !is_platform_linked(linked, platform)) {
         return format!("// {} - inline or unspecified\n", name);
     }
-
-    let addr_hex = format!("0x{:x}", addr);
 
     let fn_type_args: Vec<String> = args.iter().map(|(_, ty)| ty.clone()).collect();
     let fn_type = format!(
@@ -73,11 +75,12 @@ fn generate_free_function(func: &Function, platform: Platform, generate_docs: bo
         ret_type.to_rust_str()
     ));
 
-    output.push_str(&format!("    static ADDR: usize = {};\n", addr_hex));
     output.push_str(&format!(
-        "    unsafe {{\n        let func: {} = std::mem::transmute(base::get() + ADDR);\n        func({})\n    }}\n",
+        "    let addr = {resolver};\n    assert!(addr != 0, \"failed to resolve {}()\");\n    unsafe {{\n        let func: {} = std::mem::transmute(addr);\n        func({})\n    }}\n",
+        name,
         fn_type,
-        call_args.join(", ")
+        call_args.join(", "),
+        resolver = generate_free_function_address_resolver(func, platform)
     ));
     output.push_str("}\n\n");
 
@@ -86,6 +89,7 @@ fn generate_free_function(func: &Function, platform: Platform, generate_docs: bo
 
 pub fn generate_member_function(
     func: &FunctionBindField,
+    full_class_name: &str,
     class_name: &str,
     platform: Platform,
     generate_docs: bool,
@@ -124,8 +128,11 @@ pub fn generate_member_function(
     }
 
     let addr = get_platform_address(&func.binds, platform);
+    let linked = func.prototype.attributes.links;
 
-    if addr == INLINE || addr == UNSPECIFIED {
+    if addr == INLINE
+        || (addr == UNSPECIFIED && !can_resolve_symbol(platform, linked, full_class_name, func))
+    {
         return format!("// {}::{} - inline or unspecified\n", class_name, name);
     }
 
@@ -144,6 +151,7 @@ pub fn generate_member_function(
     output.push_str(&generate_platform_addresses_const(
         &func_name,
         &func.binds,
+        full_class_name,
         class_name,
         func,
     ));
@@ -188,10 +196,12 @@ pub fn generate_member_function(
     ));
 
     output.push_str(&format!(
-        "    unsafe {{\n        let func: {fn_type} = std::mem::transmute(base::get() + {prefix}{addr}());\n        func({args})\n    }}\n",
+        "    let addr = {prefix}{addr}();\n    assert!(addr != 0, \"failed to resolve {class_name}::{func_name}\");\n    unsafe {{\n        let func: {fn_type} = std::mem::transmute(addr);\n        func({args})\n    }}\n",
         fn_type = fn_type,
         prefix = if is_impl { "Self::" } else { "" },
         addr = addr_const_name,
+        class_name = class_name,
+        func_name = func_name,
         args = call_args.join(", ")
     ));
     output.push_str("}\n\n");
@@ -224,6 +234,7 @@ fn to_ref_types(ty: &crate::types::RustType) -> (String, String) {
 pub fn generate_platform_addresses_const(
     func_name: &str,
     binds: &PlatformNumber,
+    full_class_name: &str,
     class_name: &str,
     func: &FunctionBindField,
 ) -> String {
@@ -232,36 +243,54 @@ pub fn generate_platform_addresses_const(
 
     output.push_str(&format!("pub fn {}() -> usize {{\n", const_name));
 
-    output.push_str("    #[cfg(target_os = \"windows\")]");
-    output.push_str(&format!(" {{ return 0x{:x}; }}\n", binds.win));
-    output.push_str("    #[cfg(all(target_os = \"macos\", target_arch = \"x86_64\"))]");
-    output.push_str(&format!(" {{ return 0x{:x}; }}\n", binds.imac));
-    output.push_str("    #[cfg(all(target_os = \"macos\", target_arch = \"aarch64\"))]");
-    output.push_str(&format!(" {{ return 0x{:x}; }}\n", binds.m1));
-    output.push_str("    #[cfg(target_os = \"ios\")]");
-    output.push_str(&format!(" {{ return 0x{:x}; }}\n", binds.ios));
-
-    output.push_str("    #[cfg(all(target_os = \"android\", target_arch = \"arm\"))]");
-    if binds.android32 > 0 {
-        output.push_str(&format!(" {{ return 0x{:x}; }}\n", binds.android32));
-    } else {
-        let android_symbol = generate_android_symbol(class_name, func);
-        output.push_str(&format!(
-            " {{ static A: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0); return crate::base::android_resolve_sym(b\"{sym}\\0\", &A); }}\n",
-            sym = android_symbol
-        ));
-    }
-
-    output.push_str("    #[cfg(all(target_os = \"android\", target_arch = \"aarch64\"))]");
-    if binds.android64 > 0 {
-        output.push_str(&format!(" {{ return 0x{:x}; }}\n", binds.android64));
-    } else {
-        let android_symbol = generate_android_symbol(class_name, func);
-        output.push_str(&format!(
-            " {{ static A: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0); return crate::base::android_resolve_sym(b\"{sym}\\0\", &A); }}\n",
-            sym = android_symbol
-        ));
-    }
+    output.push_str(&generate_platform_branch(
+        Platform::Windows,
+        get_platform_address(binds, Platform::Windows),
+        &func.prototype.attributes.links,
+        full_class_name,
+        class_name,
+        func,
+    ));
+    output.push_str(&generate_platform_branch(
+        Platform::MacIntel,
+        get_platform_address(binds, Platform::MacIntel),
+        &func.prototype.attributes.links,
+        full_class_name,
+        class_name,
+        func,
+    ));
+    output.push_str(&generate_platform_branch(
+        Platform::MacArm,
+        get_platform_address(binds, Platform::MacArm),
+        &func.prototype.attributes.links,
+        full_class_name,
+        class_name,
+        func,
+    ));
+    output.push_str(&generate_platform_branch(
+        Platform::IOS,
+        get_platform_address(binds, Platform::IOS),
+        &func.prototype.attributes.links,
+        full_class_name,
+        class_name,
+        func,
+    ));
+    output.push_str(&generate_platform_branch(
+        Platform::Android32,
+        get_platform_address(binds, Platform::Android32),
+        &func.prototype.attributes.links,
+        full_class_name,
+        class_name,
+        func,
+    ));
+    output.push_str(&generate_platform_branch(
+        Platform::Android64,
+        get_platform_address(binds, Platform::Android64),
+        &func.prototype.attributes.links,
+        full_class_name,
+        class_name,
+        func,
+    ));
 
     output.push_str("    0\n}\n");
 
@@ -279,6 +308,197 @@ fn get_platform_address(binds: &PlatformNumber, platform: Platform) -> isize {
     }
 }
 
+fn generate_free_function_address_resolver(func: &Function, platform: Platform) -> String {
+    let addr = get_platform_address(&func.binds, platform);
+    if addr > 0 {
+        format!("crate::base::get() + 0x{addr:x}")
+    } else {
+        "0".to_string()
+    }
+}
+
+fn generate_platform_branch(
+    platform: Platform,
+    addr: isize,
+    linked: &BromaPlatform,
+    full_class_name: &str,
+    class_name: &str,
+    func: &FunctionBindField,
+) -> String {
+    let mut output = String::new();
+    output.push_str(&format!("    #[cfg({})]", platform.cfg_condition()));
+
+    if addr > 0 {
+        output.push_str(&format!(
+            " {{ return {}; }}\n",
+            absolute_address_expr(platform, full_class_name, addr as usize)
+        ));
+        return output;
+    }
+
+    if !can_resolve_symbol(platform, *linked, full_class_name, func) {
+        output.push_str(" { return 0; }\n");
+        return output;
+    }
+
+    match platform {
+        Platform::Windows => {
+            if let Some(symbol) = generate_windows_symbol(full_class_name, func) {
+                let module = windows_module_expr(full_class_name);
+                output.push_str(&format!(
+                    " {{ static A: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0); return crate::base::resolve_windows_symbol_abs({module}, b\"{symbol}\\0\", &A); }}\n"
+                ));
+            } else {
+                output.push_str(&format!(
+                    " {{ let _ = \"{}::{}\"; return 0; }}\n",
+                    class_name, func.prototype.name
+                ));
+            }
+        }
+        Platform::Android32 | Platform::Android64 => {
+            let symbol = generate_android_symbol(full_class_name, func);
+            output.push_str(&format!(
+                " {{ static A: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0); return crate::base::android_resolve_symbol_abs(b\"{symbol}\\0\", &A); }}\n"
+            ));
+        }
+        Platform::MacIntel | Platform::MacArm | Platform::IOS => {
+            let symbol = generate_android_symbol(full_class_name, func);
+            output.push_str(&format!(
+                " {{ static A: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0); return crate::base::resolve_dylib_symbol_abs(b\"{symbol}\\0\", &A); }}\n"
+            ));
+        }
+    }
+
+    output
+}
+
+fn absolute_address_expr(platform: Platform, class_name: &str, addr: usize) -> String {
+    match platform {
+        Platform::Windows if is_in_extensions_dll(class_name) => {
+            format!("crate::base::get_extensions() + 0x{addr:x}")
+        }
+        Platform::Windows if is_in_cocos_dll(class_name) => {
+            format!("crate::base::get_cocos() + 0x{addr:x}")
+        }
+        _ => format!("crate::base::get() + 0x{addr:x}"),
+    }
+}
+
+fn windows_module_expr(class_name: &str) -> &'static str {
+    if is_in_extensions_dll(class_name) {
+        "crate::base::get_extensions()"
+    } else if is_in_cocos_dll(class_name) {
+        "crate::base::get_cocos()"
+    } else {
+        "crate::base::get()"
+    }
+}
+
+fn is_in_extensions_dll(class_name: &str) -> bool {
+    class_name.contains("cocos2d::extension")
+}
+
+fn is_cocos_class(class_name: &str) -> bool {
+    class_name.contains("cocos2d")
+        || class_name.contains("pugi::")
+        || matches!(
+            class_name,
+            "DS_Dictionary" | "ObjectDecoder" | "ObjectDecoderDelegate" | "CCContentManager"
+        )
+}
+
+fn is_in_cocos_dll(class_name: &str) -> bool {
+    is_cocos_class(class_name)
+        && !class_name.contains("CCLightning")
+        && !is_in_extensions_dll(class_name)
+}
+
+fn is_platform_linked(linked: BromaPlatform, platform: Platform) -> bool {
+    match platform {
+        Platform::Windows => linked.contains(BromaPlatform::Windows),
+        Platform::MacIntel => {
+            linked.contains(BromaPlatform::MacIntel) || linked.contains(BromaPlatform::Mac)
+        }
+        Platform::MacArm => {
+            linked.contains(BromaPlatform::MacArm) || linked.contains(BromaPlatform::Mac)
+        }
+        Platform::IOS => linked.contains(BromaPlatform::IOS),
+        Platform::Android32 => {
+            linked.contains(BromaPlatform::Android32) || linked.contains(BromaPlatform::Android)
+        }
+        Platform::Android64 => {
+            linked.contains(BromaPlatform::Android64) || linked.contains(BromaPlatform::Android)
+        }
+    }
+}
+
+fn has_symbol_source(linked: BromaPlatform, platform: Platform, class_name: &str) -> bool {
+    if is_platform_linked(linked, platform) {
+        return true;
+    }
+
+    matches!(
+        platform,
+        Platform::Windows | Platform::Android32 | Platform::Android64
+    ) && is_cocos_class(class_name)
+}
+
+fn can_resolve_symbol(
+    platform: Platform,
+    linked: BromaPlatform,
+    class_name: &str,
+    func: &FunctionBindField,
+) -> bool {
+    if func.prototype.fn_type != FunctionType::Normal {
+        return false;
+    }
+
+    if !supports_symbol_signature(func) {
+        return false;
+    }
+
+    if !has_symbol_source(linked, platform, class_name) {
+        return false;
+    }
+
+    match platform {
+        Platform::Windows => generate_windows_symbol(class_name, func).is_some(),
+        Platform::MacIntel | Platform::MacArm | Platform::IOS => true,
+        Platform::Android32 | Platform::Android64 => true,
+    }
+}
+
+fn supports_symbol_signature(func: &FunctionBindField) -> bool {
+    supports_symbol_return_type(&cpp_to_rust_type(&func.prototype.ret.name))
+        && func
+            .prototype
+            .args
+            .iter()
+            .all(|arg| supports_symbol_arg_type(&cpp_to_rust_type(&arg.ty.name)))
+}
+
+fn supports_symbol_return_type(ty: &RustType) -> bool {
+    match ty {
+        RustType::Primitive(_) => true,
+        RustType::Pointer(inner, _) => supports_symbol_pointee_type(inner),
+        _ => false,
+    }
+}
+
+fn supports_symbol_arg_type(ty: &RustType) -> bool {
+    match ty {
+        RustType::Primitive(_) => true,
+        RustType::Pointer(inner, _) => supports_symbol_pointee_type(inner),
+        RustType::CocosType(name) if name == "enumKeyCodes" => true,
+        _ => false,
+    }
+}
+
+fn supports_symbol_pointee_type(ty: &RustType) -> bool {
+    matches!(ty, RustType::Primitive(_) | RustType::KnownClass(_))
+        || matches!(ty, RustType::CocosType(name) if name == "CCEvent")
+}
+
 fn sanitize_function_name(name: &str) -> String {
     if name == "new" {
         return "create".to_string();
@@ -286,29 +506,15 @@ fn sanitize_function_name(name: &str) -> String {
     if let Some(stripped) = name.strip_prefix('~') {
         return format!("destructor_{}", stripped);
     }
-    to_snake_case(name)
+    sanitize_ident(&to_snake_case(name))
 }
 
 fn sanitize_arg_name(name: &str) -> String {
-    let rust_keywords = [
-        "as", "break", "const", "continue", "crate", "else", "enum", "extern", "false", "fn",
-        "for", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref",
-        "return", "self", "Self", "static", "struct", "super", "trait", "true", "type", "unsafe",
-        "use", "where", "while", "async", "await", "dyn", "abstract", "become", "box", "do",
-        "final", "macro", "override", "priv", "typeof", "unsized", "virtual", "yield",
-    ];
-
     if name.is_empty() {
         return "_arg".to_string();
     }
 
-    let mut result = to_snake_case(name);
-
-    if rust_keywords.contains(&result.as_str()) {
-        result = format!("{}_", result);
-    }
-
-    result
+    sanitize_ident(&to_snake_case(name))
 }
 
 fn to_snake_case(s: &str) -> String {
@@ -340,4 +546,20 @@ fn to_snake_case(s: &str) -> String {
         }
     }
     result
+}
+
+fn sanitize_ident(name: &str) -> String {
+    let rust_keywords = [
+        "as", "break", "const", "continue", "crate", "else", "enum", "extern", "false", "fn",
+        "for", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref",
+        "return", "self", "Self", "static", "struct", "super", "trait", "true", "type", "unsafe",
+        "use", "where", "while", "async", "await", "dyn", "abstract", "become", "box", "do",
+        "final", "macro", "override", "priv", "typeof", "unsized", "virtual", "yield",
+    ];
+
+    if rust_keywords.contains(&name) {
+        format!("{name}_")
+    } else {
+        name.to_string()
+    }
 }

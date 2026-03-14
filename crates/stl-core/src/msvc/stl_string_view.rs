@@ -1,5 +1,5 @@
-use std::{fmt::Display, ops::Deref};
 use crate::types as c;
+use std::{fmt::Display, ops::Deref};
 
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
@@ -79,4 +79,3 @@ impl Deref for string_view {
         self.as_str()
     }
 }
-

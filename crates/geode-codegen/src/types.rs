@@ -270,6 +270,24 @@ fn split_template_args(s: &str) -> Vec<&str> {
     args
 }
 
+fn strip_type_const(mut ty: &str) -> (&str, bool) {
+    let mut is_const = false;
+    loop {
+        if let Some(rest) = ty.strip_prefix("const ") {
+            ty = rest.trim();
+            is_const = true;
+            continue;
+        }
+        if let Some(rest) = ty.strip_suffix(" const") {
+            ty = rest.trim();
+            is_const = true;
+            continue;
+        }
+        break;
+    }
+    (ty, is_const)
+}
+
 pub fn cpp_to_rust_type(cpp_type: &str) -> RustType {
     let trimmed = cpp_type.trim();
 
@@ -277,22 +295,17 @@ pub fn cpp_to_rust_type(cpp_type: &str) -> RustType {
         return RustType::Unknown(cpp_type.to_string());
     }
 
-    let is_const = trimmed.starts_with("const ");
-    let type_str = if is_const {
-        trimmed.strip_prefix("const ").unwrap().trim()
-    } else {
-        trimmed
-    };
-
-    if let Some(stripped) = type_str.strip_suffix('*') {
-        let inner_type = stripped.trim();
+    if let Some(stripped) = trimmed.strip_suffix('*') {
+        let (inner_type, is_const) = strip_type_const(stripped.trim());
         return RustType::Pointer(Box::new(cpp_to_rust_type(inner_type)), is_const);
     }
 
-    if let Some(stripped) = type_str.strip_suffix('&') {
-        let inner_type = stripped.trim();
+    if let Some(stripped) = trimmed.strip_suffix('&') {
+        let (inner_type, is_const) = strip_type_const(stripped.trim());
         return RustType::Reference(Box::new(cpp_to_rust_type(inner_type)), is_const);
     }
+
+    let (type_str, _is_const) = strip_type_const(trimmed);
 
     if let Some(alias) = TYPE_ALIASES.get(type_str) {
         return RustType::Primitive(alias.to_string());
@@ -323,7 +336,7 @@ pub fn cpp_to_rust_type(cpp_type: &str) -> RustType {
             return RustType::KnownClass(name.to_string());
         }
         if name.ends_with('*') {
-            let inner = name.strip_suffix('*').unwrap().trim();
+            let (inner, is_const) = strip_type_const(name.strip_suffix('*').unwrap().trim());
             return RustType::Pointer(
                 Box::new(cpp_to_rust_type(&format!("cocos2d::{inner}"))),
                 is_const,

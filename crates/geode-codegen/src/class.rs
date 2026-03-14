@@ -118,6 +118,7 @@ fn generate_impl_block(class: &Class, platform: Platform, generate_docs: bool) -
 
             let generated = generate_member_function(
                 func,
+                &class.name,
                 class_name,
                 platform,
                 generate_docs,
@@ -158,6 +159,7 @@ fn generate_impl_block(class: &Class, platform: Platform, generate_docs: bool) -
             };
             let generated = generate_member_function(
                 func,
+                &class.name,
                 class_name,
                 platform,
                 generate_docs,
@@ -198,6 +200,7 @@ fn generate_impl_block(class: &Class, platform: Platform, generate_docs: bool) -
             };
             let generated = generate_member_function(
                 func,
+                &class.name,
                 class_name,
                 platform,
                 generate_docs,

@@ -353,6 +353,7 @@ fn parse_member_function_proto(
 ) -> Result<()> {
     let mut has_modifier = false;
     let mut is_destructor = false;
+    let mut saw_return_type = false;
 
     for inner in pair.clone().into_inner() {
         match inner.as_rule() {
@@ -381,19 +382,25 @@ fn parse_member_function_proto(
             Rule::type_content => {
                 scratch.wip_type = parse_type_content(inner.as_str());
                 scratch.wip_mem_fn_proto.ret = scratch.wip_type.clone();
+                saw_return_type = true;
             }
             Rule::r#type => {
                 scratch.wip_type = parse_type_from_pair(inner);
                 scratch.wip_mem_fn_proto.ret = scratch.wip_type.clone();
+                saw_return_type = true;
             }
             Rule::identifier => {
                 let name = inner.as_str();
                 if is_destructor {
                     scratch.wip_mem_fn_proto.name = format!("~{}", name);
                     scratch.wip_mem_fn_proto.fn_type = FunctionType::Destructor;
-                } else if !has_modifier && scratch.wip_mem_fn_proto.name.is_empty() {
+                } else if scratch.wip_mem_fn_proto.name.is_empty() {
                     scratch.wip_mem_fn_proto.name = name.to_string();
-                    scratch.wip_mem_fn_proto.fn_type = FunctionType::Constructor;
+                    scratch.wip_mem_fn_proto.fn_type = if saw_return_type || has_modifier {
+                        FunctionType::Normal
+                    } else {
+                        FunctionType::Constructor
+                    };
                 } else {
                     scratch.wip_mem_fn_proto.name = name.to_string();
                 }

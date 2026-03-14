@@ -18,7 +18,7 @@ mod imp {
         HMODULE(*MODULE.get_or_init(|| unsafe {
             GetModuleHandleA(windows::core::s!("opengl32.dll"))
                 .unwrap_or_else(|_| {
-                    LoadLibraryA(windows::core::s!("opengl32.dll")).unwrap_or(HMODULE::default())
+                    LoadLibraryA(windows::core::s!("opengl32.dll")).unwrap_or_default()
                 })
                 .0 as usize
         }) as *mut _)

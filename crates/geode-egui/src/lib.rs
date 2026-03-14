@@ -846,10 +846,10 @@ pub unsafe fn dispatch_keyboard_msg_hook(
     }
 
     let should_eat_input = should_capture_keyboard();
-    if should_eat_input || !is_key_down {
-        if let Some(key) = cocos_key_to_egui_key(key) {
-            push_key(key, is_key_down, is_key_repeat);
-        }
+    if (should_eat_input || !is_key_down)
+        && let Some(key) = cocos_key_to_egui_key(key)
+    {
+        push_key(key, is_key_down, is_key_repeat);
     }
 
     if should_eat_input {
@@ -1099,4 +1099,3 @@ macro_rules! install_hooks {
         geode_egui::install_input_hooks!();
     };
 }
-

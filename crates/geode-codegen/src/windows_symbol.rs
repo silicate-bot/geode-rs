@@ -141,10 +141,9 @@ fn encode_arg_type(current_class: &str, ty: &str, seen: &mut Vec<String>) -> Opt
     let encoded = encode_value_type(current_class, ty, true)?;
     if encoded == "_N"
         && let Some(index) = seen.iter().position(|seen_ty| seen_ty == &encoded)
+        && index < 10
     {
-        if index < 10 {
-            return Some(index.to_string());
-        }
+        return Some(index.to_string());
     }
     seen.push(encoded.clone());
     Some(encoded)
@@ -263,7 +262,9 @@ mod tests {
 
         assert_eq!(
             generate_windows_symbol("cocos2d::CCKeyboardDispatcher", &func).as_deref(),
-            Some("?dispatchKeyboardMSG@CCKeyboardDispatcher@cocos2d@@QEAA_NW4enumKeyCodes@2@_N1N@Z")
+            Some(
+                "?dispatchKeyboardMSG@CCKeyboardDispatcher@cocos2d@@QEAA_NW4enumKeyCodes@2@_N1N@Z"
+            )
         );
     }
 
@@ -273,10 +274,7 @@ mod tests {
             prototype: MemberFunctionProto {
                 name: "dispatchScrollMSG".into(),
                 ret: Type::new("bool"),
-                args: vec![
-                    arg("", "float"),
-                    arg("", "float"),
-                ],
+                args: vec![arg("", "float"), arg("", "float")],
                 ..Default::default()
             },
             ..Default::default()

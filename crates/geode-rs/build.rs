@@ -655,6 +655,7 @@ fn generate_dynamic_function_wrapper(content: &str) -> Option<String> {
         format!(" {return_str}")
     };
     let windows_value_return = windows_symbol_needs_sret(symbol);
+    let android_aarch64_value_return = android_aarch64_symbol_needs_sret(return_str);
     let is_method = params
         .first()
         .and_then(|param| param.split(':').next())
@@ -709,15 +710,19 @@ fn generate_dynamic_function_wrapper(content: &str) -> Option<String> {
             )
         }
     } else {
-        format!(
-            "let func: {fn_type} = std::mem::transmute(addr);\n            {call_expr}"
-        )
+        format!("let func: {fn_type} = std::mem::transmute(addr);\n            {call_expr}")
+    };
+    let android_aarch64_call = if android_aarch64_value_return {
+        let ret_ty = return_str.strip_prefix("-> ").unwrap_or(return_str).trim();
+        emit_android_aarch64_sret_call(&call_args, ret_ty)
+    } else {
+        format!("let func: {fn_type} = std::mem::transmute(addr);\n        {call_expr}")
     };
 
     let symbol_bytes = rust_byte_string(symbol);
 
     Some(format!(
-        "#[inline]\npub unsafe fn {fn_name}({params_str}){return_clause} {{\n    fn __addr() -> usize {{\n        #[cfg(target_os = \"windows\")]\n        {{\n            static A: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);\n            crate::base::resolve_windows_symbol_in_modules_abs(\n                &[\n                    crate::base::get_cocos(),\n                    crate::base::get_extensions(),\n                    crate::base::get(),\n                    crate::base::get_geode(),\n                ],\n                {symbol_bytes},\n                &A,\n            )\n        }}\n        #[cfg(all(target_os = \"android\", target_arch = \"arm\"))]\n        {{\n            static A: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);\n            crate::base::android_resolve_symbol_abs({symbol_bytes}, &A)\n        }}\n        #[cfg(all(target_os = \"android\", target_arch = \"aarch64\"))]\n        {{\n            static A: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);\n            crate::base::android_resolve_symbol_abs({symbol_bytes}, &A)\n        }}\n        #[cfg(any(target_os = \"macos\", target_os = \"ios\"))]\n        {{\n            static A: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);\n            crate::base::resolve_dylib_symbol_abs({symbol_bytes}, &A)\n        }}\n        #[cfg(not(any(\n            target_os = \"windows\",\n            all(target_os = \"android\", target_arch = \"arm\"),\n            all(target_os = \"android\", target_arch = \"aarch64\"),\n            target_os = \"macos\",\n            target_os = \"ios\"\n        )))]\n        {{\n            0\n        }}\n    }}\n\n    let addr = __addr();\n    assert!(addr != 0, \"failed to resolve {fn_name}\");\n    #[cfg(target_os = \"windows\")]\n    {{\n        {windows_call}\n    }}\n    #[cfg(not(target_os = \"windows\"))]\n    {{\n        let func: {fn_type} = std::mem::transmute(addr);\n        {call_expr}\n    }}\n}}\n"
+        "#[inline]\npub unsafe fn {fn_name}({params_str}){return_clause} {{\n    fn __addr() -> usize {{\n        #[cfg(target_os = \"windows\")]\n        {{\n            static A: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);\n            crate::base::resolve_windows_symbol_in_modules_abs(\n                &[\n                    crate::base::get_cocos(),\n                    crate::base::get_extensions(),\n                    crate::base::get(),\n                    crate::base::get_geode(),\n                ],\n                {symbol_bytes},\n                &A,\n            )\n        }}\n        #[cfg(all(target_os = \"android\", target_arch = \"arm\"))]\n        {{\n            static A: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);\n            crate::base::android_resolve_symbol_abs({symbol_bytes}, &A)\n        }}\n        #[cfg(all(target_os = \"android\", target_arch = \"aarch64\"))]\n        {{\n            static A: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);\n            crate::base::android_resolve_symbol_abs({symbol_bytes}, &A)\n        }}\n        #[cfg(any(target_os = \"macos\", target_os = \"ios\"))]\n        {{\n            static A: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);\n            crate::base::resolve_dylib_symbol_abs({symbol_bytes}, &A)\n        }}\n        #[cfg(not(any(\n            target_os = \"windows\",\n            all(target_os = \"android\", target_arch = \"arm\"),\n            all(target_os = \"android\", target_arch = \"aarch64\"),\n            target_os = \"macos\",\n            target_os = \"ios\"\n        )))]\n        {{\n            0\n        }}\n    }}\n\n    let addr = __addr();\n    assert!(addr != 0, \"failed to resolve {fn_name}\");\n    #[cfg(target_os = \"windows\")]\n    {{\n        {windows_call}\n    }}\n    #[cfg(all(target_os = \"android\", target_arch = \"aarch64\"))]\n    {{\n        {android_aarch64_call}\n    }}\n    #[cfg(not(any(target_os = \"windows\", all(target_os = \"android\", target_arch = \"aarch64\"))))]\n    {{\n        let func: {fn_type} = std::mem::transmute(addr);\n        {call_expr}\n    }}\n}}\n"
     ))
 }
 
@@ -824,6 +829,87 @@ fn windows_symbol_needs_sret(symbol: &str) -> bool {
     regex::Regex::new(r"@@[^@]*\?A[UV]")
         .unwrap()
         .is_match(symbol)
+}
+
+#[cfg(feature = "bindgen")]
+fn android_aarch64_symbol_needs_sret(return_str: &str) -> bool {
+    let ty = return_str
+        .strip_prefix("->")
+        .map(str::trim)
+        .unwrap_or("")
+        .trim();
+
+    if ty.is_empty()
+        || ty == "()"
+        || ty.starts_with('*')
+        || ty.starts_with('&')
+        || ty.starts_with("Option<")
+        || ty.starts_with("unsafe extern")
+        || ty.starts_with("extern ")
+        || ty.contains("fn(")
+        || ty.contains("c_void")
+    {
+        return false;
+    }
+
+    let root = ty
+        .split(['<', ' ', '[', ',', ';'])
+        .next()
+        .unwrap_or(ty)
+        .rsplit("::")
+        .next()
+        .unwrap_or(ty)
+        .trim();
+
+    if root.is_empty() {
+        return false;
+    }
+
+    !matches!(
+        root,
+        "bool"
+            | "char"
+            | "f32"
+            | "f64"
+            | "i8"
+            | "i16"
+            | "i32"
+            | "i64"
+            | "i128"
+            | "isize"
+            | "u8"
+            | "u16"
+            | "u32"
+            | "u64"
+            | "u128"
+            | "usize"
+    ) && root
+        .chars()
+        .next()
+        .map(|ch| ch.is_ascii_uppercase())
+        .unwrap_or(false)
+}
+
+#[cfg(feature = "bindgen")]
+fn emit_android_aarch64_sret_call(call_args: &[String], ret_ty: &str) -> String {
+    if call_args.len() > 7 {
+        return format!(
+            "let func: unsafe extern \"C\" fn() -> {ret_ty} = std::mem::transmute(addr);\n        func()"
+        );
+    }
+
+    let regs = ["x0", "x1", "x2", "x3", "x4", "x5", "x6"];
+    let mut reg_inputs = String::new();
+    for (index, arg) in call_args.iter().enumerate() {
+        let reg = regs[index];
+        reg_inputs.push_str(&format!(
+            "in(\"{reg}\") {{\n                let mut __tmp = 0usize;\n                let __size = std::mem::size_of_val(&{arg});\n                let __copy_len = if __size > 8 {{ 8 }} else {{ __size }};\n                std::ptr::copy_nonoverlapping(\n                    &{arg} as *const _ as *const u8,\n                    &mut __tmp as *mut _ as *mut u8,\n                    __copy_len,\n                );\n                __tmp\n            }},\n            "
+        ));
+    }
+
+    format!(
+        "let mut out = std::mem::MaybeUninit::<{ret_ty}>::uninit();\n        unsafe {{\n            std::arch::asm!(\n                \"blr {{fn_ptr}}\",\n                fn_ptr = in(reg) addr,\n                in(\"x8\") out.as_mut_ptr() as usize,\n                {reg_inputs}clobber_abi(\"C\"),\n            );\n        }}\n        out.assume_init()"
+    )
 }
 
 #[cfg(feature = "bindgen")]

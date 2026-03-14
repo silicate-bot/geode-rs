@@ -259,8 +259,11 @@ impl Backend {
                 gl.get_parameter_i32_slice(glow::VIEWPORT, &mut viewport);
             }
             if viewport[2] > 0 && viewport[3] > 0 {
-                frame.egui_size = Vec2::new(viewport[2] as f32, viewport[3] as f32);
                 frame.pixels = [viewport[2] as u32, viewport[3] as u32];
+                frame.egui_size = Vec2::new(
+                    viewport[2] as f32 / frame.pixels_per_point,
+                    viewport[3] as f32 / frame.pixels_per_point,
+                );
             }
         }
         update_last_frame_info(frame);
@@ -399,13 +402,26 @@ fn current_frame_info() -> Result<FrameInfo, RenderError> {
             return Err(RenderError::MissingScreenSize);
         }
 
-        let egui_size = Vec2::new(pixels[0] as f32, pixels[1] as f32);
+        let pixels_per_point = {
+            let scale_x = pixels[0] as f32 / points.x.max(1.0);
+            let scale_y = pixels[1] as f32 / points.y.max(1.0);
+            scale_x.max(scale_y).max(1.0)
+        };
+        let egui_size = if cfg!(target_os = "android") {
+            points
+        } else {
+            Vec2::new(pixels[0] as f32, pixels[1] as f32)
+        };
 
         Ok(FrameInfo {
             points,
             egui_size,
             pixels,
-            pixels_per_point: 1.0,
+            pixels_per_point: if cfg!(target_os = "android") {
+                pixels_per_point
+            } else {
+                1.0
+            },
             delta_time,
         })
     }
@@ -470,7 +486,6 @@ fn should_capture_pointer() -> bool {
 fn should_capture_keyboard() -> bool {
     should_block_input() || wants_keyboard_input()
 }
-
 
 fn update_modifiers_from_key_event(key: geode_rs::cocos::enumKeyCodes, pressed: bool) {
     with_input_state(|input| {
@@ -669,7 +684,11 @@ pub fn cocos_point_to_egui(point: geode_rs::cocos::CCPoint) -> Option<Pos2> {
 }
 
 pub fn frame_pixels_to_egui(position: Pos2) -> Option<Pos2> {
-    Some(position)
+    let frame = last_frame_info().or_else(|| current_frame_info().ok())?;
+    Some(Pos2::new(
+        position.x / frame.pixels_per_point,
+        position.y / frame.pixels_per_point,
+    ))
 }
 
 fn cocos_point_to_egui_with_frame(
@@ -885,7 +904,10 @@ pub unsafe fn touch_dispatch_hook(
 
     let point = geode_rs::cocos::CCTouch_getLocation(touch);
     if geode_rs::geode_mouse_position().x == 0.0 && geode_rs::geode_mouse_position().y == 0.0 {
-        push_cocos_pointer_moved(geode_rs::cocos::CCPoint { x: point.x, y: point.y });
+        push_cocos_pointer_moved(geode_rs::cocos::CCPoint {
+            x: point.x,
+            y: point.y,
+        });
     }
 
     if should_capture_pointer() {
@@ -950,7 +972,9 @@ macro_rules! install_render_hooks {
 macro_rules! install_input_hooks {
     () => {
         mod __geode_egui_input_hooks {
-            use geode_egui::geode_rs::classes::{CCIMEDispatcher, CCKeyboardDispatcher, CCTouchDispatcher};
+            use geode_egui::geode_rs::classes::{
+                CCIMEDispatcher, CCKeyboardDispatcher, CCTouchDispatcher,
+            };
             use geode_egui::geode_rs::cocos::{CCEvent, CCSet, enumKeyCodes};
 
             #[derive(Default)]
@@ -1003,7 +1027,8 @@ macro_rules! install_input_hooks {
                 ) -> bool {
                     unsafe {
                         geode_egui::dispatch_keyboard_msg_hook(
-                            this as *mut _ as *mut geode_egui::geode_rs::cocos::CCKeyboardDispatcher,
+                            this as *mut _
+                                as *mut geode_egui::geode_rs::cocos::CCKeyboardDispatcher,
                             key,
                             is_key_down,
                             is_key_repeat,
@@ -1074,25 +1099,4 @@ macro_rules! install_hooks {
         geode_egui::install_input_hooks!();
     };
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 

@@ -4,7 +4,7 @@ use std::ffi::c_void;
 use std::sync::OnceLock;
 
 use crate::CallingConvention;
-use crate::stl::{StlSharedPtr, StlString};
+use crate::stl::{StlSharedPtr, StlSpan, StlString};
 use crate::tulip::{HandlerMetadata, HookMetadata, TulipConvention};
 use geode_macros::geode_bind;
 
@@ -80,6 +80,21 @@ geode_bind! {
         android32: "_ZN5geode4Hook6enableEv",
         android64: "_ZN5geode4Hook6enableEv",
     }
+
+    pub unsafe fn patch_create(
+        address: *mut c_void,
+        byte_span: StlSpan<u8>
+    ) -> sret StlSharedPtr<c_void> {
+        win: "?create@Patch@geode@@SA?AV?$shared_ptr@VPatch@geode@@@std@@PEAXV?$span@$$CBE$0?0@4@@Z"
+    }
+
+    pub unsafe fn patch_enable(patch_ptr: *mut c_void) -> method_sret [u8; 64] {
+        win: "?enable@Patch@geode@@QEAA?AV?$Result@XV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@@2@XZ"
+    }
+
+    pub unsafe fn patch_disable(patch_ptr: *mut c_void) -> method_sret [u8; 64] {
+        win: "?disable@Patch@geode@@QEAA?AV?$Result@XV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@@2@XZ"
+    }
 }
 
 #[cfg(target_os = "android")]
@@ -93,6 +108,50 @@ pub fn android_log(msg: &[u8]) {
 #[cfg(not(target_os = "android"))]
 #[allow(dead_code)]
 pub fn android_log(_msg: &[u8]) {}
+
+pub struct Patch {
+    ptr: *mut c_void,
+}
+
+unsafe impl Send for Patch {}
+unsafe impl Sync for Patch {}
+
+impl Patch {
+    pub unsafe fn create(
+        address: *mut c_void,
+        bytes: &[u8]
+    ) -> Option<Patch> {
+        let patch_sptr = match patch_create(address, bytes.into()) {
+            Some(p) => p,
+            None => {
+                #[cfg(not(target_os = "android"))]
+                eprintln!("[geode-rs] Patch::create: patch_create symbol not found");
+                android_log(b"Patch::create: patch_create symbol not found");
+                return None;
+            }
+        };
+
+        if patch_sptr.is_null() {
+            #[cfg(not(target_os = "android"))]
+            eprintln!("[geode-rs] Patch::create: patch_create returned null");
+            android_log(b"Patch::create: patch_create returned null");
+            return None;
+        }
+
+        let raw = patch_sptr.as_ptr();
+
+        std::mem::forget(patch_sptr);
+        Some(Self { ptr: raw })
+    }
+
+    pub unsafe fn enable(&self) -> bool {
+        patch_enable(self.ptr).is_some()
+    }
+
+    pub unsafe fn disable(&self) -> bool {
+        patch_disable(self.ptr).is_some()
+    }
+}
 
 pub struct Hook {
     ptr: *mut c_void,
